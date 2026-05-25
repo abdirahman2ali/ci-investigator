@@ -246,6 +246,41 @@ Analyze the failure and produce the JSON fix."""
 
 
 # ---------------------------------------------------------------------------
+# File update via Contents API (used to commit processed_runs.json)
+# ---------------------------------------------------------------------------
+
+
+def apply_patch_via_api(
+    owner: str,
+    repo: str,
+    branch: str,
+    path: str,
+    content: str,
+    commit_message: str,
+) -> None:
+    resp = requests.get(
+        f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+        headers=GH_HEADERS,
+        params={"ref": branch},
+        timeout=30,
+    )
+    file_sha = resp.json().get("sha") if resp.status_code == 200 else None
+
+    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    payload: dict = {"message": commit_message, "content": encoded, "branch": branch}
+    if file_sha:
+        payload["sha"] = file_sha
+
+    resp = requests.put(
+        f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+        headers=GH_HEADERS,
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+
+# ---------------------------------------------------------------------------
 # GitHub Issue creation
 # ---------------------------------------------------------------------------
 
@@ -317,6 +352,26 @@ _Opened automatically by [ci-investigator](https://github.com/{WATCHER_REPO})_""
 
 
 # ---------------------------------------------------------------------------
+# PR Creator trigger
+# ---------------------------------------------------------------------------
+
+
+def dispatch_pr_creator() -> None:
+    """Fire a repository_dispatch to ci-investigator so pr-creator.yml runs immediately."""
+    watcher_owner, watcher_repo = WATCHER_REPO.split("/")
+    resp = requests.post(
+        f"https://api.github.com/repos/{watcher_owner}/{watcher_repo}/dispatches",
+        headers=GH_HEADERS,
+        json={"event_type": "ci-issue-created"},
+        timeout=30,
+    )
+    if resp.status_code == 204:
+        logger.info("Dispatched ci-issue-created event to %s", WATCHER_REPO)
+    else:
+        logger.warning("repository_dispatch returned %d — PR creator may not trigger", resp.status_code)
+
+
+# ---------------------------------------------------------------------------
 # Main orchestration
 # ---------------------------------------------------------------------------
 
@@ -346,6 +401,7 @@ def process_run(owner: str, repo: str, run: dict) -> None:
     try:
         issue_url = open_issue(owner, repo, run_id, result)
         logger.info("Issue opened: %s", issue_url)
+        dispatch_pr_creator()
     except Exception as e:
         logger.error("Failed to open issue for %s/%s run %s: %s", owner, repo, run_id, e)
 

@@ -1,0 +1,35 @@
+name: PR Creator
+
+on:
+  repository_dispatch:
+    types: [ci-issue-created]  # fired by investigate.py after each new issue is opened
+  schedule:
+    - cron: "0 9 * * *"  # daily fallback to catch any missed dispatches
+  workflow_dispatch:
+
+jobs:
+  create-prs:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4.2.0
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - uses: actions/setup-python@v5.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run PR creator
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_OWNER: ${{ github.repository_owner }}
+        run: python scripts/pr_creator.py
