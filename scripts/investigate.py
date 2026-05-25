@@ -3,7 +3,6 @@ CI Failure Investigator — polls all repos owned by GH_OWNER for recent workflo
 failures, diagnoses each via Claude, and opens a fix PR in the target repo.
 """
 
-import ast
 import base64
 import io
 import json
@@ -247,28 +246,7 @@ Analyze the failure and produce the JSON fix."""
 
 
 # ---------------------------------------------------------------------------
-# Validation
-# ---------------------------------------------------------------------------
-
-
-def validate_patch(file_path: str, new_content: str) -> tuple[bool, str]:
-    ext = Path(file_path).suffix
-    if ext == ".py":
-        try:
-            ast.parse(new_content)
-        except SyntaxError as e:
-            return False, str(e)
-    elif ext in {".yml", ".yaml"}:
-        try:
-            import yaml  # available via requests dep chain; safe to try
-            yaml.safe_load(new_content)
-        except Exception as e:
-            return False, str(e)
-    return True, "ok"
-
-
-# ---------------------------------------------------------------------------
-# GitHub PR creation
+# GitHub Issue creation
 # ---------------------------------------------------------------------------
 
 
@@ -285,146 +263,52 @@ def ensure_labels(owner: str, repo: str) -> None:
         )  # ignore errors — label may already exist
 
 
-def get_default_branch_sha(owner: str, repo: str, branch: str) -> str:
-    ref = gh_get(
-        f"https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{branch}"
-    ).json()
-    return ref["object"]["sha"]
-
-
-def create_branch(owner: str, repo: str, branch: str, sha: str) -> None:
-    resp = requests.post(
-        f"https://api.github.com/repos/{owner}/{repo}/git/refs",
-        headers=GH_HEADERS,
-        json={"ref": f"refs/heads/{branch}", "sha": sha},
-        timeout=10,
-    )
-    if resp.status_code not in (201, 422):  # 422 = branch already exists
-        resp.raise_for_status()
-
-
-def apply_patch_via_api(
-    owner: str, repo: str, branch: str, file_path: str, new_content: str, message: str
-) -> None:
-    # Get current file SHA (required for update)
-    try:
-        existing = gh_get(
-            f"https://api.github.com/repos/{owner}/{repo}/contents/{file_path}",
-            params={"ref": branch},
-        ).json()
-        file_sha = existing["sha"]
-    except requests.HTTPError:
-        file_sha = None  # new file
-
-    payload: dict = {
-        "message": message,
-        "content": base64.b64encode(new_content.encode()).decode(),
-        "branch": branch,
-    }
-    if file_sha:
-        payload["sha"] = file_sha
-
-    resp = requests.put(
-        f"https://api.github.com/repos/{owner}/{repo}/contents/{file_path}",
-        headers=GH_HEADERS,
-        json=payload,
-        timeout=30,
-    )
-    resp.raise_for_status()
-
-
-def open_issue(
-    owner: str,
-    repo: str,
-    run_id: int,
-    result: dict,
-    validation_notes: list[str],
-) -> str:
-    validation_summary = "\n".join(validation_notes) or "No patches attempted."
+def open_issue(owner: str, repo: str, run_id: int, result: dict) -> str:
     run_url = f"https://github.com/{owner}/{repo}/actions/runs/{run_id}"
-
-    body = f"""## Root Cause
-{result.get("root_cause", "Unknown")}
-
-## Why No Code Fix Was Applied
-{result.get("fix_description") or "Claude could not produce a patch that matched the current source files."}
-
-## Confidence
-{result.get("confidence", "unknown")}
-
-## Patch Attempt Notes
-{validation_summary}
-
-## Notes
-{result.get("notes") or "_None_"}
-
-## Failed Workflow Run
-{run_url}
-
----
-_Opened automatically by [ci-investigator](https://github.com/{WATCHER_REPO}) — manual fix required_"""
-
-    resp = requests.post(
-        f"https://api.github.com/repos/{owner}/{repo}/issues",
-        headers=GH_HEADERS,
-        json={
-            "title": f"ci failure: investigation for run #{run_id} (no auto-fix available)",
-            "body": body,
-            "labels": ["automated", "ci-failure"],
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()["html_url"]
-
-
-def open_pr(
-    owner: str,
-    repo: str,
-    branch: str,
-    default_branch: str,
-    run_id: int,
-    result: dict,
-    validation_notes: list[str],
-) -> str:
     patches = result.get("patches", [])
-    files_changed = "\n".join(f"- `{p['file']}`" for p in patches) or "_No files changed_"
-    validation_summary = "\n".join(validation_notes) or "No patches to validate."
-    fix_text = result.get("fix_description") or "No code fix identified — diagnosis only."
-    run_url = f"https://github.com/{owner}/{repo}/actions/runs/{run_id}"
+
+    patch_blocks = ""
+    if patches:
+        sections = []
+        for p in patches:
+            ext = Path(p["file"]).suffix.lstrip(".") or "text"
+            sections.append(
+                f"### `{p['file']}`\n\n"
+                f"**Original:**\n```{ext}\n{p['original']}\n```\n\n"
+                f"**Replacement:**\n```{ext}\n{p['replacement']}\n```"
+            )
+        patch_blocks = "\n\n".join(sections)
+    else:
+        patch_blocks = "_Claude could not identify a code fix for this failure._"
 
     body = f"""## Root Cause
 {result.get("root_cause", "Unknown")}
 
-## Fix Applied
-{fix_text}
+## Proposed Fix
+{result.get("fix_description") or "_No fix description provided._"}
 
 ## Confidence
 {result.get("confidence", "unknown")}
 
-## Files Changed
-{files_changed}
+## Proposed Patches
+{patch_blocks}
 
 ## Notes
 {result.get("notes") or "_None_"}
 
 ## Failed Workflow Run
 {run_url}
-
-## Validation
-{validation_summary}
 
 ---
 _Opened automatically by [ci-investigator](https://github.com/{WATCHER_REPO})_"""
 
     resp = requests.post(
-        f"https://api.github.com/repos/{owner}/{repo}/pulls",
+        f"https://api.github.com/repos/{owner}/{repo}/issues",
         headers=GH_HEADERS,
         json={
-            "title": f"fix(auto): investigate workflow failure — run #{run_id}",
+            "title": f"ci failure: run #{run_id} — {result.get('root_cause', 'unknown error')[:80]}",
             "body": body,
-            "head": branch,
-            "base": default_branch,
+            "labels": ["automated", "ci-failure"],
         },
         timeout=30,
     )
@@ -451,94 +335,19 @@ def process_run(owner: str, repo: str, run: dict) -> None:
         logger.error("Claude API call failed for %s/%s run %s: %s", owner, repo, run_id, e)
         return
 
-    patches = result.get("patches", [])
     logger.info(
-        "Claude diagnosis (confidence=%s): %s — %d patches",
+        "Claude diagnosis (confidence=%s): %s — %d proposed patches",
         result.get("confidence"),
         result.get("root_cause"),
-        len(patches),
+        len(result.get("patches", [])),
     )
 
-    # Determine default branch
-    repo_meta = gh_get(f"https://api.github.com/repos/{owner}/{repo}").json()
-    default_branch = repo_meta.get("default_branch", "main")
-    head_sha = get_default_branch_sha(owner, repo, default_branch)
-
-    fix_branch = f"fix/auto-{run_id}"
-    create_branch(owner, repo, fix_branch, head_sha)
-
-    validation_notes: list[str] = []
-    applied_patches = []
-
-    for patch in patches:
-        file_path = patch["file"]
-        original = patch["original"]
-        replacement = patch["replacement"]
-
-        # Fetch current file content
-        try:
-            blob = gh_get(
-                f"https://api.github.com/repos/{owner}/{repo}/contents/{file_path}",
-                params={"ref": fix_branch},
-            ).json()
-            current = base64.b64decode(blob["content"]).decode("utf-8", errors="replace")
-        except Exception as e:
-            note = f"- `{file_path}`: could not fetch — {e}"
-            validation_notes.append(note)
-            logger.warning("Patch skipped — %s", note)
-            continue
-
-        if original not in current:
-            note = f"- `{file_path}`: original string not found in file — skipped"
-            validation_notes.append(note)
-            logger.warning("Patch skipped — %s", note)
-            continue
-
-        new_content = current.replace(original, replacement, 1)
-        valid, reason = validate_patch(file_path, new_content)
-        if not valid:
-            note = f"- `{file_path}`: syntax validation FAILED — {reason} (patch skipped)"
-            validation_notes.append(note)
-            logger.warning("Patch skipped — %s", note)
-            continue
-
-        try:
-            apply_patch_via_api(
-                owner, repo, fix_branch, file_path, new_content,
-                f"fix(auto): patch {file_path} for run #{run_id}"
-            )
-            note = f"- `{file_path}`: patch applied, syntax OK"
-            validation_notes.append(note)
-            logger.info("Patch applied — %s", note)
-            applied_patches.append(patch)
-        except Exception as e:
-            note = f"- `{file_path}`: failed to apply — {e}"
-            validation_notes.append(note)
-            logger.warning("Patch skipped — %s", note)
-
-    result["patches"] = applied_patches
-
     ensure_labels(owner, repo)
-
-    if applied_patches:
-        # Patches were committed — open a PR
-        try:
-            pr_url = open_pr(
-                owner, repo, fix_branch, default_branch, run_id, result, validation_notes
-            )
-            logger.info("PR opened: %s", pr_url)
-        except Exception as e:
-            logger.error("Failed to open PR for %s/%s run %s: %s", owner, repo, run_id, e)
-    else:
-        # No patches applied — branch is identical to main, open an Issue instead
-        logger.warning(
-            "No patches applied for %s/%s run %s — opening diagnosis issue", owner, repo, run_id
-        )
-        try:
-            issue_url = open_issue(owner, repo, run_id, result, validation_notes)
-            logger.info("Issue opened: %s", issue_url)
-        except Exception as e:
-            logger.error("Failed to open issue for %s/%s run %s: %s", owner, repo, run_id, e)
+    try:
+        issue_url = open_issue(owner, repo, run_id, result)
+        logger.info("Issue opened: %s", issue_url)
+    except Exception as e:
+        logger.error("Failed to open issue for %s/%s run %s: %s", owner, repo, run_id, e)
 
 
 def main() -> None:
