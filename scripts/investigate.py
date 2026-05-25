@@ -333,6 +333,51 @@ def apply_patch_via_api(
     resp.raise_for_status()
 
 
+def open_issue(
+    owner: str,
+    repo: str,
+    run_id: int,
+    result: dict,
+    validation_notes: list[str],
+) -> str:
+    validation_summary = "\n".join(validation_notes) or "No patches attempted."
+    run_url = f"https://github.com/{owner}/{repo}/actions/runs/{run_id}"
+
+    body = f"""## Root Cause
+{result.get("root_cause", "Unknown")}
+
+## Why No Code Fix Was Applied
+{result.get("fix_description") or "Claude could not produce a patch that matched the current source files."}
+
+## Confidence
+{result.get("confidence", "unknown")}
+
+## Patch Attempt Notes
+{validation_summary}
+
+## Notes
+{result.get("notes") or "_None_"}
+
+## Failed Workflow Run
+{run_url}
+
+---
+_Opened automatically by [ci-investigator](https://github.com/{WATCHER_REPO}) — manual fix required_"""
+
+    resp = requests.post(
+        f"https://api.github.com/repos/{owner}/{repo}/issues",
+        headers=GH_HEADERS,
+        json={
+            "title": f"ci failure: investigation for run #{run_id} (no auto-fix available)",
+            "body": body,
+            "labels": ["automated", "ci-failure"],
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["html_url"]
+
+
 def open_pr(
     owner: str,
     repo: str,
@@ -438,21 +483,23 @@ def process_run(owner: str, repo: str, run: dict) -> None:
             ).json()
             current = base64.b64decode(blob["content"]).decode("utf-8", errors="replace")
         except Exception as e:
-            validation_notes.append(f"- `{file_path}`: could not fetch — {e}")
+            note = f"- `{file_path}`: could not fetch — {e}"
+            validation_notes.append(note)
+            logger.warning("Patch skipped — %s", note)
             continue
 
         if original not in current:
-            validation_notes.append(
-                f"- `{file_path}`: original string not found — skipped"
-            )
+            note = f"- `{file_path}`: original string not found in file — skipped"
+            validation_notes.append(note)
+            logger.warning("Patch skipped — %s", note)
             continue
 
         new_content = current.replace(original, replacement, 1)
         valid, reason = validate_patch(file_path, new_content)
         if not valid:
-            validation_notes.append(
-                f"- `{file_path}`: syntax validation FAILED — {reason} (patch skipped)"
-            )
+            note = f"- `{file_path}`: syntax validation FAILED — {reason} (patch skipped)"
+            validation_notes.append(note)
+            logger.warning("Patch skipped — %s", note)
             continue
 
         try:
@@ -460,21 +507,38 @@ def process_run(owner: str, repo: str, run: dict) -> None:
                 owner, repo, fix_branch, file_path, new_content,
                 f"fix(auto): patch {file_path} for run #{run_id}"
             )
-            validation_notes.append(f"- `{file_path}`: patch applied, syntax OK")
+            note = f"- `{file_path}`: patch applied, syntax OK"
+            validation_notes.append(note)
+            logger.info("Patch applied — %s", note)
             applied_patches.append(patch)
         except Exception as e:
-            validation_notes.append(f"- `{file_path}`: failed to apply — {e}")
+            note = f"- `{file_path}`: failed to apply — {e}"
+            validation_notes.append(note)
+            logger.warning("Patch skipped — %s", note)
 
     result["patches"] = applied_patches
 
     ensure_labels(owner, repo)
-    try:
-        pr_url = open_pr(
-            owner, repo, fix_branch, default_branch, run_id, result, validation_notes
+
+    if applied_patches:
+        # Patches were committed — open a PR
+        try:
+            pr_url = open_pr(
+                owner, repo, fix_branch, default_branch, run_id, result, validation_notes
+            )
+            logger.info("PR opened: %s", pr_url)
+        except Exception as e:
+            logger.error("Failed to open PR for %s/%s run %s: %s", owner, repo, run_id, e)
+    else:
+        # No patches applied — branch is identical to main, open an Issue instead
+        logger.warning(
+            "No patches applied for %s/%s run %s — opening diagnosis issue", owner, repo, run_id
         )
-        logger.info("PR opened: %s", pr_url)
-    except Exception as e:
-        logger.error("Failed to open PR for %s/%s run %s: %s", owner, repo, run_id, e)
+        try:
+            issue_url = open_issue(owner, repo, run_id, result, validation_notes)
+            logger.info("Issue opened: %s", issue_url)
+        except Exception as e:
+            logger.error("Failed to open issue for %s/%s run %s: %s", owner, repo, run_id, e)
 
 
 def main() -> None:
