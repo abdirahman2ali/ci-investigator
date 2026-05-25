@@ -27,6 +27,7 @@ GH_OWNER = os.environ["GH_OWNER"]
 WATCHER_REPO = os.environ.get("GITHUB_REPOSITORY", f"{GH_OWNER}/ci-investigator")
 
 DEDUP_MARKER = "<!-- pr-created -->"
+MANUAL_FIX_MARKER = "<!-- manual-fix-flagged -->"
 BRANCH_PREFIX = "ci-fix"
 SKIP_CONFIDENCE = {"low"}
 
@@ -398,6 +399,21 @@ def open_pr(
     return resp.json()["html_url"]
 
 
+def _request_review(owner: str, repo: str, pr_url: str) -> None:
+    # pr_url: https://github.com/{owner}/{repo}/pull/{number}
+    pr_number = int(pr_url.rstrip("/").split("/")[-1])
+    resp = requests.post(
+        f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
+        headers=GH_HEADERS,
+        json={"reviewers": [GH_OWNER]},
+        timeout=30,
+    )
+    if resp.status_code in (200, 201):
+        logger.info("Review requested from @%s on PR #%d", GH_OWNER, pr_number)
+    else:
+        logger.warning("Could not request review (status %d) — GitHub notification may not fire", resp.status_code)
+
+
 # ---------------------------------------------------------------------------
 # Issue close-out
 # ---------------------------------------------------------------------------
@@ -415,6 +431,67 @@ def close_issue(owner: str, repo: str, issue_number: int) -> None:
         f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}",
         {"state": "closed", "state_reason": "completed"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Manual-fix flagging (no_code_fix issues)
+# ---------------------------------------------------------------------------
+
+
+def _is_already_flagged(owner: str, repo: str, issue_number: int) -> bool:
+    page = 1
+    while True:
+        comments = gh_get(
+            f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments",
+            params={"per_page": 100, "page": page},
+        ).json()
+        if not comments:
+            return False
+        for c in comments:
+            if MANUAL_FIX_MARKER in c.get("body", ""):
+                return True
+        if len(comments) < 100:
+            return False
+        page += 1
+
+
+def _ensure_manual_fix_label(owner: str, repo: str) -> None:
+    requests.post(
+        f"https://api.github.com/repos/{owner}/{repo}/labels",
+        headers=GH_HEADERS,
+        json={"name": "needs-manual-fix", "color": "d93f0b", "description": "CI fix requires manual intervention"},
+        timeout=10,
+    )  # ignore errors — label may already exist
+
+
+def flag_no_code_fix_issue(
+    owner: str, repo: str, issue_number: int, issue_url: str, issue_body: str
+) -> None:
+    if _is_already_flagged(owner, repo, issue_number):
+        logger.info("Issue #%d already flagged for manual fix — skipping", issue_number)
+        return
+
+    _ensure_manual_fix_label(owner, repo)
+
+    gh_post(
+        f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/labels",
+        {"labels": ["needs-manual-fix"]},
+    )
+
+    root_cause_match = re.search(r"^## Root Cause\s*\n(.+?)(?=\n##|\Z)", issue_body, re.DOTALL)
+    root_cause = root_cause_match.group(1).strip() if root_cause_match else "See issue for details."
+
+    notes_match = re.search(r"^## Notes\s*\n(.+?)(?=\n##|\Z)", issue_body, re.DOTALL)
+    notes = notes_match.group(1).strip() if notes_match else ""
+
+    comment = (
+        f"@{GH_OWNER} **Manual fix required** — ci-investigator could not generate an automated patch for this failure.\n\n"
+        f"**Root cause:** {root_cause}\n\n"
+        + (f"**Suggested action:** {notes}\n\n" if notes and notes != "_None_" else "")
+        + MANUAL_FIX_MARKER
+    )
+    comment_on_issue(owner, repo, issue_number, comment)
+    logger.info("Flagged issue #%d as needs-manual-fix", issue_number)
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +513,8 @@ def process_issue(issue: dict) -> None:
         return
 
     if not has_patch_section(body):
-        logger.info("Skipping #%d — no parseable patch section (no_code_fix)", issue_number)
+        logger.info("Issue #%d has no code fix — flagging for manual review", issue_number)
+        flag_no_code_fix_issue(owner, repo, issue_number, issue_url, body)
         return
 
     if is_already_processed(owner, repo, issue_number):
@@ -474,6 +552,7 @@ def process_issue(issue: dict) -> None:
     try:
         pr_url = open_pr(owner, repo, branch, default_branch, pr_title, pr_body)
         logger.info("Opened PR: %s", pr_url)
+        _request_review(owner, repo, pr_url)
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 422:
             logger.warning("PR already exists for branch %s — posting dedup marker anyway", branch)
