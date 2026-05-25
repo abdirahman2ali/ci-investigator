@@ -246,6 +246,41 @@ Analyze the failure and produce the JSON fix."""
 
 
 # ---------------------------------------------------------------------------
+# File update via Contents API (used to commit processed_runs.json)
+# ---------------------------------------------------------------------------
+
+
+def apply_patch_via_api(
+    owner: str,
+    repo: str,
+    branch: str,
+    path: str,
+    content: str,
+    commit_message: str,
+) -> None:
+    resp = requests.get(
+        f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+        headers=GH_HEADERS,
+        params={"ref": branch},
+        timeout=30,
+    )
+    file_sha = resp.json().get("sha") if resp.status_code == 200 else None
+
+    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    payload: dict = {"message": commit_message, "content": encoded, "branch": branch}
+    if file_sha:
+        payload["sha"] = file_sha
+
+    resp = requests.put(
+        f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+        headers=GH_HEADERS,
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+
+# ---------------------------------------------------------------------------
 # GitHub Issue creation
 # ---------------------------------------------------------------------------
 

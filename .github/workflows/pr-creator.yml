@@ -1,0 +1,33 @@
+name: PR Creator
+
+on:
+  schedule:
+    - cron: "0 9 * * *"  # once daily at 09:00 UTC — issues accumulate from overnight watcher runs
+  workflow_dispatch:
+
+jobs:
+  create-prs:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4.2.0
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - uses: actions/setup-python@v5.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run PR creator
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_OWNER: ${{ github.repository_owner }}
+        run: python scripts/pr_creator.py
