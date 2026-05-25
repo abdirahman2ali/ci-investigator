@@ -36,7 +36,7 @@ GH_OWNER = os.environ["GH_OWNER"]
 # Watcher repo where processed_runs.json lives (this repo)
 WATCHER_REPO = os.environ.get("GITHUB_REPOSITORY", f"{GH_OWNER}/ci-investigator")
 
-LOOKBACK_MINUTES = 90  # investigate failures from the last 90 minutes
+LOOKBACK_DAYS = 1  # investigate unprocessed failures from the last 24 hours
 PROCESSED_FILE = Path(__file__).resolve().parent.parent / "processed_runs.json"
 MAX_SOURCE_BYTES = 80_000  # skip files larger than this
 SKIP_DIRS = {"node_modules", ".venv", "venv", "__pycache__", ".git", "dist", "build"}
@@ -110,13 +110,14 @@ def list_failed_runs(owner: str, repo: str, since: datetime) -> list[dict]:
     try:
         data = gh_get(
             f"https://api.github.com/repos/{owner}/{repo}/actions/runs",
-            params={"status": "failure", "per_page": 10},
+            params={"status": "failure", "per_page": 20},
         ).json()
     except requests.HTTPError as e:
         if e.response.status_code == 404:
             return []
         raise
     runs = data.get("workflow_runs", [])
+    # Filter to runs within the lookback window; dedup handles re-processing
     return [
         r for r in runs
         if datetime.fromisoformat(r["updated_at"].replace("Z", "+00:00")) > since
@@ -478,7 +479,7 @@ def process_run(owner: str, repo: str, run: dict) -> None:
 
 def main() -> None:
     processed = load_processed()
-    since = datetime.now(timezone.utc) - timedelta(minutes=LOOKBACK_MINUTES)
+    since = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
 
     repos = list_repos()
     logger.info("Scanning %d repos for failures since %s", len(repos), since.isoformat())
