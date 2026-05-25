@@ -12,8 +12,10 @@ import base64
 import logging
 import os
 import re
+import smtplib
 import sys
 import time
+from email.mime.text import MIMEText
 from typing import Optional
 
 import requests
@@ -27,6 +29,7 @@ GH_OWNER = os.environ["GH_OWNER"]
 WATCHER_REPO = os.environ.get("GITHUB_REPOSITORY", f"{GH_OWNER}/ci-investigator")
 
 DEDUP_MARKER = "<!-- pr-created -->"
+MANUAL_FIX_MARKER = "<!-- manual-fix-flagged -->"
 BRANCH_PREFIX = "ci-fix"
 SKIP_CONFIDENCE = {"low"}
 
@@ -418,6 +421,99 @@ def close_issue(owner: str, repo: str, issue_number: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Email notifications
+# ---------------------------------------------------------------------------
+
+
+def send_email(subject: str, body: str) -> None:
+    gmail_user = os.environ.get("GMAIL_USER")
+    gmail_password = os.environ.get("GMAIL_APP_PASSWORD")
+    if not gmail_user or not gmail_password:
+        logger.warning("GMAIL_USER or GMAIL_APP_PASSWORD not set — skipping email")
+        return
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = gmail_user
+    msg["To"] = gmail_user
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(gmail_user, gmail_password)
+        smtp.send_message(msg)
+    logger.info("Email sent: %s", subject)
+
+
+# ---------------------------------------------------------------------------
+# Manual-fix flagging (no_code_fix issues)
+# ---------------------------------------------------------------------------
+
+
+def _is_already_flagged(owner: str, repo: str, issue_number: int) -> bool:
+    page = 1
+    while True:
+        comments = gh_get(
+            f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments",
+            params={"per_page": 100, "page": page},
+        ).json()
+        if not comments:
+            return False
+        for c in comments:
+            if MANUAL_FIX_MARKER in c.get("body", ""):
+                return True
+        if len(comments) < 100:
+            return False
+        page += 1
+
+
+def _ensure_manual_fix_label(owner: str, repo: str) -> None:
+    requests.post(
+        f"https://api.github.com/repos/{owner}/{repo}/labels",
+        headers=GH_HEADERS,
+        json={"name": "needs-manual-fix", "color": "d93f0b", "description": "CI fix requires manual intervention"},
+        timeout=10,
+    )  # ignore errors — label may already exist
+
+
+def flag_no_code_fix_issue(
+    owner: str, repo: str, issue_number: int, issue_url: str, issue_body: str
+) -> None:
+    if _is_already_flagged(owner, repo, issue_number):
+        logger.info("Issue #%d already flagged for manual fix — skipping", issue_number)
+        return
+
+    _ensure_manual_fix_label(owner, repo)
+
+    gh_post(
+        f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/labels",
+        {"labels": ["needs-manual-fix"]},
+    )
+
+    root_cause_match = re.search(r"^## Root Cause\s*\n(.+?)(?=\n##|\Z)", issue_body, re.DOTALL)
+    root_cause = root_cause_match.group(1).strip() if root_cause_match else "See issue for details."
+
+    notes_match = re.search(r"^## Notes\s*\n(.+?)(?=\n##|\Z)", issue_body, re.DOTALL)
+    notes = notes_match.group(1).strip() if notes_match else ""
+
+    comment = (
+        "**Manual fix required** — ci-investigator could not generate an automated patch for this failure.\n\n"
+        f"**Root cause:** {root_cause}\n\n"
+        + (f"**Suggested action:** {notes}\n\n" if notes and notes != "_None_" else "")
+        + f"{MANUAL_FIX_MARKER}"
+    )
+    comment_on_issue(owner, repo, issue_number, comment)
+
+    send_email(
+        subject=f"[ci-investigator] Manual fix required: {owner}/{repo}#{issue_number}",
+        body=(
+            f"A CI failure in {owner}/{repo} requires manual intervention.\n\n"
+            f"Issue: {issue_url}\n\n"
+            f"Root cause: {root_cause}\n\n"
+            + (f"Suggested action:\n{notes}\n\n" if notes and notes != "_None_" else "")
+            + "Label 'needs-manual-fix' has been added to the issue."
+        ),
+    )
+    logger.info("Flagged issue #%d as needs-manual-fix", issue_number)
+
+
+# ---------------------------------------------------------------------------
 # Per-issue orchestration
 # ---------------------------------------------------------------------------
 
@@ -436,7 +532,8 @@ def process_issue(issue: dict) -> None:
         return
 
     if not has_patch_section(body):
-        logger.info("Skipping #%d — no parseable patch section (no_code_fix)", issue_number)
+        logger.info("Issue #%d has no code fix — flagging for manual review", issue_number)
+        flag_no_code_fix_issue(owner, repo, issue_number, issue_url, body)
         return
 
     if is_already_processed(owner, repo, issue_number):
@@ -474,6 +571,17 @@ def process_issue(issue: dict) -> None:
     try:
         pr_url = open_pr(owner, repo, branch, default_branch, pr_title, pr_body)
         logger.info("Opened PR: %s", pr_url)
+        send_email(
+            subject=f"[ci-investigator] PR opened: {owner}/{repo}#{issue_number}",
+            body=(
+                f"An automated PR was opened for a CI failure in {owner}/{repo}.\n\n"
+                f"PR: {pr_url}\n"
+                f"Issue: {issue_url}\n"
+                f"Confidence: {confidence}\n\n"
+                f"Applied patches:\n" + "\n".join(f"  - {a}" for a in applied)
+                + ("\n\nWarnings:\n" + "\n".join(f"  - {w}" for w in warnings) if warnings else "")
+            ),
+        )
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 422:
             logger.warning("PR already exists for branch %s — posting dedup marker anyway", branch)
