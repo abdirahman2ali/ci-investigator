@@ -32,6 +32,4 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           GH_OWNER: ${{ github.repository_owner }}
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python scripts/pr_creator.py

@@ -12,10 +12,8 @@ import base64
 import logging
 import os
 import re
-import smtplib
 import sys
 import time
-from email.mime.text import MIMEText
 from typing import Optional
 
 import requests
@@ -401,6 +399,21 @@ def open_pr(
     return resp.json()["html_url"]
 
 
+def _request_review(owner: str, repo: str, pr_url: str) -> None:
+    # pr_url: https://github.com/{owner}/{repo}/pull/{number}
+    pr_number = int(pr_url.rstrip("/").split("/")[-1])
+    resp = requests.post(
+        f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
+        headers=GH_HEADERS,
+        json={"reviewers": [GH_OWNER]},
+        timeout=30,
+    )
+    if resp.status_code in (200, 201):
+        logger.info("Review requested from @%s on PR #%d", GH_OWNER, pr_number)
+    else:
+        logger.warning("Could not request review (status %d) — GitHub notification may not fire", resp.status_code)
+
+
 # ---------------------------------------------------------------------------
 # Issue close-out
 # ---------------------------------------------------------------------------
@@ -418,27 +431,6 @@ def close_issue(owner: str, repo: str, issue_number: int) -> None:
         f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}",
         {"state": "closed", "state_reason": "completed"},
     )
-
-
-# ---------------------------------------------------------------------------
-# Email notifications
-# ---------------------------------------------------------------------------
-
-
-def send_email(subject: str, body: str) -> None:
-    gmail_user = os.environ.get("GMAIL_USER")
-    gmail_password = os.environ.get("GMAIL_APP_PASSWORD")
-    if not gmail_user or not gmail_password:
-        logger.warning("GMAIL_USER or GMAIL_APP_PASSWORD not set — skipping email")
-        return
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = gmail_user
-    msg["To"] = gmail_user
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(gmail_user, gmail_password)
-        smtp.send_message(msg)
-    logger.info("Email sent: %s", subject)
 
 
 # ---------------------------------------------------------------------------
@@ -493,23 +485,12 @@ def flag_no_code_fix_issue(
     notes = notes_match.group(1).strip() if notes_match else ""
 
     comment = (
-        "**Manual fix required** — ci-investigator could not generate an automated patch for this failure.\n\n"
+        f"@{GH_OWNER} **Manual fix required** — ci-investigator could not generate an automated patch for this failure.\n\n"
         f"**Root cause:** {root_cause}\n\n"
         + (f"**Suggested action:** {notes}\n\n" if notes and notes != "_None_" else "")
-        + f"{MANUAL_FIX_MARKER}"
+        + MANUAL_FIX_MARKER
     )
     comment_on_issue(owner, repo, issue_number, comment)
-
-    send_email(
-        subject=f"[ci-investigator] Manual fix required: {owner}/{repo}#{issue_number}",
-        body=(
-            f"A CI failure in {owner}/{repo} requires manual intervention.\n\n"
-            f"Issue: {issue_url}\n\n"
-            f"Root cause: {root_cause}\n\n"
-            + (f"Suggested action:\n{notes}\n\n" if notes and notes != "_None_" else "")
-            + "Label 'needs-manual-fix' has been added to the issue."
-        ),
-    )
     logger.info("Flagged issue #%d as needs-manual-fix", issue_number)
 
 
@@ -571,17 +552,7 @@ def process_issue(issue: dict) -> None:
     try:
         pr_url = open_pr(owner, repo, branch, default_branch, pr_title, pr_body)
         logger.info("Opened PR: %s", pr_url)
-        send_email(
-            subject=f"[ci-investigator] PR opened: {owner}/{repo}#{issue_number}",
-            body=(
-                f"An automated PR was opened for a CI failure in {owner}/{repo}.\n\n"
-                f"PR: {pr_url}\n"
-                f"Issue: {issue_url}\n"
-                f"Confidence: {confidence}\n\n"
-                f"Applied patches:\n" + "\n".join(f"  - {a}" for a in applied)
-                + ("\n\nWarnings:\n" + "\n".join(f"  - {w}" for w in warnings) if warnings else "")
-            ),
-        )
+        _request_review(owner, repo, pr_url)
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 422:
             logger.warning("PR already exists for branch %s — posting dedup marker anyway", branch)
