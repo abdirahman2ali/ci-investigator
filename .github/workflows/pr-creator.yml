@@ -1,8 +1,10 @@
 name: PR Creator
 
 on:
+  repository_dispatch:
+    types: [ci-issue-created]  # fired by investigate.py after each new issue is opened
   schedule:
-    - cron: "0 9 * * *"  # once daily at 09:00 UTC — issues accumulate from overnight watcher runs
+    - cron: "0 9 * * *"  # daily fallback to catch any missed dispatches
   workflow_dispatch:
 
 jobs:

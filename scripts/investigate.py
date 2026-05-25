@@ -352,6 +352,26 @@ _Opened automatically by [ci-investigator](https://github.com/{WATCHER_REPO})_""
 
 
 # ---------------------------------------------------------------------------
+# PR Creator trigger
+# ---------------------------------------------------------------------------
+
+
+def dispatch_pr_creator() -> None:
+    """Fire a repository_dispatch to ci-investigator so pr-creator.yml runs immediately."""
+    watcher_owner, watcher_repo = WATCHER_REPO.split("/")
+    resp = requests.post(
+        f"https://api.github.com/repos/{watcher_owner}/{watcher_repo}/dispatches",
+        headers=GH_HEADERS,
+        json={"event_type": "ci-issue-created"},
+        timeout=30,
+    )
+    if resp.status_code == 204:
+        logger.info("Dispatched ci-issue-created event to %s", WATCHER_REPO)
+    else:
+        logger.warning("repository_dispatch returned %d — PR creator may not trigger", resp.status_code)
+
+
+# ---------------------------------------------------------------------------
 # Main orchestration
 # ---------------------------------------------------------------------------
 
@@ -381,6 +401,7 @@ def process_run(owner: str, repo: str, run: dict) -> None:
     try:
         issue_url = open_issue(owner, repo, run_id, result)
         logger.info("Issue opened: %s", issue_url)
+        dispatch_pr_creator()
     except Exception as e:
         logger.error("Failed to open issue for %s/%s run %s: %s", owner, repo, run_id, e)
 
