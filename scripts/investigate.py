@@ -85,7 +85,18 @@ def save_processed(processed: set[str], new_keys: list[str]) -> None:
 
 
 def gh_get(url: str, params: Optional[dict] = None, stream: bool = False):
-    resp = requests.get(url, headers=GH_HEADERS, params=params, stream=stream, timeout=30)
+    import time
+    retries = 3
+    backoff = 5
+    for attempt in range(retries):
+        resp = requests.get(url, headers=GH_HEADERS, params=params, stream=stream, timeout=30)
+        if resp.status_code in (500, 502, 503, 504) and attempt < retries - 1:
+            logger.warning("GitHub API returned %d for %s — retrying in %ds (attempt %d/%d)", resp.status_code, url, backoff, attempt + 1, retries)
+            time.sleep(backoff)
+            backoff *= 2
+            continue
+        resp.raise_for_status()
+        return resp
     resp.raise_for_status()
     return resp
 
