@@ -89,7 +89,7 @@ def save_processed(processed: set[str], new_keys: list[str]) -> None:
 
 
 def gh_get(url: str, params: Optional[dict] = None, stream: bool = False):
-    resp = requests.get(url, headers=GH_HEADERS, params=params, stream=stream, timeout=30)
+    resp = requests.get(url, headers=GH_HEADERS, params=params, stream=stream, timeout=30, verify=SSL_VERIFY)
     resp.raise_for_status()
     return resp
 
