@@ -352,6 +352,7 @@ _Opened automatically by [ci-investigator](https://github.com/{WATCHER_REPO})_""
             "labels": ["automated", "ci-failure"],
         },
         timeout=30,
+        verify=SSL_VERIFY,
     )
     resp.raise_for_status()
     return resp.json()["html_url"]
