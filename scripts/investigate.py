@@ -47,6 +47,10 @@ GH_HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
+# Set GH_SSL_NO_VERIFY=1 in the environment to disable SSL verification
+# (e.g. when a corporate/runner proxy uses a self-signed certificate)
+SSL_VERIFY = os.environ.get("GH_SSL_NO_VERIFY", "").strip() not in ("1", "true", "yes")
+
 # ---------------------------------------------------------------------------
 # Deduplication
 # ---------------------------------------------------------------------------
@@ -85,7 +89,7 @@ def save_processed(processed: set[str], new_keys: list[str]) -> None:
 
 
 def gh_get(url: str, params: Optional[dict] = None, stream: bool = False):
-    resp = requests.get(url, headers=GH_HEADERS, params=params, stream=stream, timeout=30)
+    resp = requests.get(url, headers=GH_HEADERS, params=params, stream=stream, timeout=30, verify=SSL_VERIFY)
     resp.raise_for_status()
     return resp
 
@@ -263,6 +267,7 @@ def apply_patch_via_api(
         headers=GH_HEADERS,
         params={"ref": branch},
         timeout=30,
+        verify=SSL_VERIFY,
     )
     file_sha = resp.json().get("sha") if resp.status_code == 200 else None
 
@@ -276,6 +281,7 @@ def apply_patch_via_api(
         headers=GH_HEADERS,
         json=payload,
         timeout=30,
+        verify=SSL_VERIFY,
     )
     resp.raise_for_status()
 
@@ -346,6 +352,7 @@ _Opened automatically by [ci-investigator](https://github.com/{WATCHER_REPO})_""
             "labels": ["automated", "ci-failure"],
         },
         timeout=30,
+        verify=SSL_VERIFY,
     )
     resp.raise_for_status()
     return resp.json()["html_url"]
@@ -364,6 +371,7 @@ def dispatch_pr_creator() -> None:
         headers=GH_HEADERS,
         json={"event_type": "ci-issue-created"},
         timeout=30,
+        verify=SSL_VERIFY,
     )
     if resp.status_code == 204:
         logger.info("Dispatched ci-issue-created event to %s", WATCHER_REPO)
