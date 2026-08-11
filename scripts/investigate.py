@@ -267,6 +267,7 @@ def apply_patch_via_api(
         headers=GH_HEADERS,
         params={"ref": branch},
         timeout=30,
+        verify=SSL_VERIFY,
     )
     file_sha = resp.json().get("sha") if resp.status_code == 200 else None
 
@@ -280,6 +281,7 @@ def apply_patch_via_api(
         headers=GH_HEADERS,
         json=payload,
         timeout=30,
+        verify=SSL_VERIFY,
     )
     resp.raise_for_status()
 
