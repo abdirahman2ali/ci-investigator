@@ -47,6 +47,10 @@ GH_HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
+# Set GH_SSL_NO_VERIFY=1 in the environment to disable SSL verification
+# (e.g. when a corporate/runner proxy uses a self-signed certificate)
+SSL_VERIFY = os.environ.get("GH_SSL_NO_VERIFY", "").strip() not in ("1", "true", "yes")
+
 # ---------------------------------------------------------------------------
 # Deduplication
 # ---------------------------------------------------------------------------
