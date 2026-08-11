@@ -371,6 +371,7 @@ def dispatch_pr_creator() -> None:
         headers=GH_HEADERS,
         json={"event_type": "ci-issue-created"},
         timeout=30,
+        verify=SSL_VERIFY,
     )
     if resp.status_code == 204:
         logger.info("Dispatched ci-issue-created event to %s", WATCHER_REPO)
